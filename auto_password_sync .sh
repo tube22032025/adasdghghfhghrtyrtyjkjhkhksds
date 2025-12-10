@@ -11,7 +11,7 @@ set -euo pipefail
 # -----------------------------------------------------------------------------
 # Cấu hình
 # -----------------------------------------------------------------------------
-readonly GOOGLE_SHEET_URL="https://script.google.com/macros/s/AKfycbz0osorEzkhCo7dJ4JfR9vutlUJqRsPgEHkdbzywKwX_5v0TeOzVNTa-KbNEsrIWyJ_/exec"
+readonly GOOGLE_SHEET_URL="https://script.google.com/macros/s/AKfycbwyov7TT3OIykme9mFDUO1LKRvcQrwqnU90XdCLHZcSB6ALqwJJlN5jYjLhq4S86_Pr/exec"
 readonly CURL_TIMEOUT=10
 readonly BACKUP_WAIT_TIME=30
 
