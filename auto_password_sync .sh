@@ -11,7 +11,7 @@ set -euo pipefail
 # -----------------------------------------------------------------------------
 # Cấu hình
 # -----------------------------------------------------------------------------
-readonly GOOGLE_SHEET_URL="https://script.google.com/macros/s/AKfycby3HTo7JYJdOxNmJevhJQYi9INCd4_Glr0WjFHoHzqz-9ZgVziurGGouc35aq-PY009/exec"
+readonly GOOGLE_SHEET_URL="https://script.google.com/macros/s/AKfycbz0osorEzkhCo7dJ4JfR9vutlUJqRsPgEHkdbzywKwX_5v0TeOzVNTa-KbNEsrIWyJ_/exec"
 readonly CURL_TIMEOUT=10
 readonly BACKUP_WAIT_TIME=30
 
@@ -208,13 +208,28 @@ main() {
     local INSTALL_OUTPUT
     INSTALL_OUTPUT=$(yes y | bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh) 2>&1) || true
     
-    # Parse kết quả cài đặt
+    # Parse kết quả cài đặt (cải tiến regex để parse chính xác hơn)
     local PANEL_USERNAME PANEL_PASSWORD PANEL_PORT PANEL_WEBBASEPATH PANEL_ACCESS_URL
-    PANEL_USERNAME=$(echo "$INSTALL_OUTPUT" | grep -oP 'Username:\s*\K\S+' || echo "N/A")
-    PANEL_PASSWORD=$(echo "$INSTALL_OUTPUT" | grep -oP 'Password:\s*\K\S+' || echo "N/A")
-    PANEL_PORT=$(echo "$INSTALL_OUTPUT" | grep -oP 'Port:\s*\K\d+' || echo "N/A")
-    PANEL_WEBBASEPATH=$(echo "$INSTALL_OUTPUT" | grep -oP 'WebBasePath:\s*\K\S+' || echo "N/A")
-    PANEL_ACCESS_URL=$(echo "$INSTALL_OUTPUT" | grep -oP 'Access URL:\s*\K\S+' || echo "N/A")
+    
+    # Lấy Username (dòng chứa "Username:")
+    PANEL_USERNAME=$(echo "$INSTALL_OUTPUT" | grep -i "Username:" | tail -1 | sed 's/.*Username:[[:space:]]*//' | tr -d '[:space:]')
+    [[ -z "$PANEL_USERNAME" ]] && PANEL_USERNAME="N/A"
+    
+    # Lấy Password (dòng chứa "Password:" - không phải Root Password)
+    PANEL_PASSWORD=$(echo "$INSTALL_OUTPUT" | grep -i "^Password:" | tail -1 | sed 's/.*Password:[[:space:]]*//' | tr -d '[:space:]')
+    [[ -z "$PANEL_PASSWORD" ]] && PANEL_PASSWORD="N/A"
+    
+    # Lấy Port (dòng chứa "Port:")
+    PANEL_PORT=$(echo "$INSTALL_OUTPUT" | grep -i "^Port:" | tail -1 | sed 's/.*Port:[[:space:]]*//' | tr -d '[:space:]')
+    [[ -z "$PANEL_PORT" || ! "$PANEL_PORT" =~ ^[0-9]+$ ]] && PANEL_PORT="N/A"
+    
+    # Lấy WebBasePath
+    PANEL_WEBBASEPATH=$(echo "$INSTALL_OUTPUT" | grep -i "WebBasePath:" | tail -1 | sed 's/.*WebBasePath:[[:space:]]*//' | tr -d '[:space:]')
+    [[ -z "$PANEL_WEBBASEPATH" ]] && PANEL_WEBBASEPATH="N/A"
+    
+    # Lấy Access URL
+    PANEL_ACCESS_URL=$(echo "$INSTALL_OUTPUT" | grep -i "Access URL:" | tail -1 | sed 's/.*Access URL:[[:space:]]*//' | tr -d '[:space:]')
+    [[ -z "$PANEL_ACCESS_URL" ]] && PANEL_ACCESS_URL="N/A"
     
     if [[ "$PANEL_USERNAME" != "N/A" && "$PANEL_PASSWORD" != "N/A" ]]; then
         log_info "Cài đặt 3x-ui thành công"
