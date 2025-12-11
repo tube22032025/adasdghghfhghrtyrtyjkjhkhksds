@@ -11,7 +11,7 @@ set -euo pipefail
 # -----------------------------------------------------------------------------
 # Cấu hình
 # -----------------------------------------------------------------------------
-readonly GOOGLE_SHEET_URL="https://script.google.com/macros/s/AKfycbzvdOi3aAL-hk7X1b0OZnRH3cCHUesmnVW53ts2nBZ4z5RZnY5DwtiKmxbHvhV0tvbT/exec"
+readonly GOOGLE_SHEET_URL="https://script.google.com/macros/s/AKfycbxYuPT2uGbFdGm92mRGcWBtR8DwdmX8JNdu9YjIc_cGl3l2_3IvGb0OnQ_1qfq-n0R3/exec"
 readonly CURL_TIMEOUT=10
 readonly BACKUP_WAIT_TIME=30
 
@@ -210,13 +210,23 @@ main() {
     uninstall_3xui
     
     log_info "Bắt đầu cài đặt 3x-ui mới..."
-    local INSTALL_OUTPUT
+    local INSTALL_OUTPUT INSTALL_EXIT_CODE
+    local INSTALL_SCRIPT="/tmp/3xui_install.sh"
+    
+    # Tải script về trước
+    curl -Ls -o "$INSTALL_SCRIPT" https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh
+    chmod +x "$INSTALL_SCRIPT"
+    
     set +e
-    INSTALL_OUTPUT=$(yes y | bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh) 2>&1)
-    local INSTALL_EXIT_CODE=$?
+    # Chạy với expect-like input, tránh SIGPIPE
+    INSTALL_OUTPUT=$(echo -e "y\ny\ny\ny\ny\n" | bash "$INSTALL_SCRIPT" 2>&1)
+    INSTALL_EXIT_CODE=$?
     set -e
     
-    if [[ $INSTALL_EXIT_CODE -ne 0 ]]; then
+    # Xóa script tạm
+    rm -f "$INSTALL_SCRIPT"
+    
+    if [[ $INSTALL_EXIT_CODE -ne 0 && $INSTALL_EXIT_CODE -ne 141 ]]; then
         log_warn "Cài đặt 3x-ui có thể gặp lỗi (exit code: $INSTALL_EXIT_CODE), tiếp tục parse output..."
     fi
     
