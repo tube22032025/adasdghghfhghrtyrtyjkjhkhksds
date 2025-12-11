@@ -1,303 +1,164 @@
 #!/bin/bash
-# =============================================================================
-# Auto Password Sync & 3x-ui Setup Script
-# Version: 2.0.0
-# Description: Tự động đổi mật khẩu root, cài đặt 3x-ui và đồng bộ Google Sheets
-# Idempotent: Có thể chạy nhiều lần an toàn
-# =============================================================================
 
-set -euo pipefail
-
-# -----------------------------------------------------------------------------
-# Cấu hình
-# -----------------------------------------------------------------------------
-readonly GOOGLE_SHEET_URL="https://script.google.com/macros/s/AKfycbwyov7TT3OIykme9mFDUO1LKRvcQrwqnU90XdCLHZcSB6ALqwJJlN5jYjLhq4S86_Pr/exec"
-readonly CURL_TIMEOUT=10
-readonly BACKUP_WAIT_TIME=30
+# Cấu hình Google Sheets
+GOOGLE_SHEET_URL="https://script.google.com/macros/s/AKfycbwt62a7LgF_U2KXsy2dFCfbGphgIY9YBc3BqB-EaKRMJbD65xu-BfAsAFrib9GK4632/exec"
 
 # Màu sắc cho output
-readonly RED='\033[0;31m'
-readonly GREEN='\033[0;32m'
-readonly YELLOW='\033[1;33m'
-readonly NC='\033[0m'
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
 
-# -----------------------------------------------------------------------------
-# Hàm tiện ích
-# -----------------------------------------------------------------------------
-log_info() { echo -e "${GREEN}✓ $1${NC}"; }
-log_warn() { echo -e "${YELLOW}⚠ $1${NC}"; }
-log_error() { echo -e "${RED}✗ $1${NC}"; }
-log_step() { echo -e "\n${YELLOW}$1${NC}"; }
-
-# Kiểm tra quyền root
-check_root() {
-    if [[ $EUID -ne 0 ]]; then
-        log_error "Script này cần chạy với quyền root!"
-        exit 1
-    fi
-}
-
-# Validate IPv4
+# Function validate IPv4
 validate_ipv4() {
-    local ip="$1"
-    local IFS='.'
-    local -a octets
-    read -ra octets <<< "$ip"
+    local ip=$1
+    local stat=1
     
-    [[ ${#octets[@]} -eq 4 ]] || return 1
-    
-    for octet in "${octets[@]}"; do
-        [[ "$octet" =~ ^[0-9]+$ ]] && ((octet >= 0 && octet <= 255)) || return 1
-    done
-    return 0
-}
-
-# Lấy IPv4 public với fallback
-get_public_ip() {
-    local ip=""
-    local services=("ifconfig.me" "api.ipify.org" "icanhazip.com" "ipinfo.io/ip")
-    
-    for service in "${services[@]}"; do
-        ip=$(curl -4 -s --max-time 5 "$service" 2>/dev/null | tr -d '[:space:]')
-        if validate_ipv4 "$ip"; then
-            echo "$ip"
-            return 0
+    # Kiểm tra format cơ bản
+    if [[ $ip =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+        # Tách IP thành array
+        OIFS=$IFS
+        IFS='.'
+        ip=($ip)
+        IFS=$OIFS
+        
+        # Kiểm tra mỗi octet <= 255
+        if [[ ${ip[0]} -le 255 && ${ip[1]} -le 255 && ${ip[2]} -le 255 && ${ip[3]} -le 255 ]]; then
+            stat=0
         fi
-    done
+    fi
     
-    echo "ERROR_NO_IPV4"
-    return 1
+    return $stat
 }
 
-# Gỡ cài đặt 3x-ui cũ (idempotent)
-uninstall_3xui() {
-    if command -v x-ui &>/dev/null || [[ -f "/usr/local/x-ui/x-ui" ]] || [[ -f "/etc/systemd/system/x-ui.service" ]]; then
-        log_warn "Phát hiện 3x-ui cũ, đang gỡ bỏ..."
-        
-        systemctl stop x-ui 2>/dev/null || true
-        systemctl disable x-ui 2>/dev/null || true
-        rm -f /etc/systemd/system/x-ui.service
-        systemctl daemon-reload 2>/dev/null || true
-        rm -rf /usr/local/x-ui /etc/x-ui
-        rm -f /usr/bin/x-ui
-        
-        log_info "Đã gỡ bỏ 3x-ui cũ"
-    fi
-}
+echo -e "${GREEN}=== Script tự động đổi mật khẩu root và đồng bộ Google Sheets ===${NC}\n"
 
-# Đồng bộ dữ liệu lên Google Sheets
-sync_to_sheets() {
-    local -a params=("$@")
-    local response
-    
-    response=$(curl -s -L -X POST "$GOOGLE_SHEET_URL" \
-        "${params[@]}" \
-        --max-time "$CURL_TIMEOUT" 2>/dev/null) || return 1
-    
-    if [[ "$response" == *"success"* ]]; then
-        log_info "Đồng bộ Google Sheets thành công"
-        return 0
-    else
-        log_warn "Response: $response"
-        return 1
-    fi
-}
+# 1. Tạo mật khẩu ngẫu nhiên mạnh
+NEW_PASSWORD=$(openssl rand -base64 16 | tr -d "=+/" | cut -c1-16)
+echo -e "${YELLOW}Mật khẩu mới được tạo: ${GREEN}${NEW_PASSWORD}${NC}"
 
-# Dọn dẹp VPS về trạng thái sạch
-cleanup_vps() {
-    log_step "Đang dọn dẹp VPS về trạng thái sạch..."
-    
-    # Xóa file backup và script tạm
-    rm -f /root/password_backup_*.txt 2>/dev/null || true
-    rm -f /root/{auto_setup,setup_ssh*,install}.sh 2>/dev/null || true
-    rm -rf /root/ssh_backups 2>/dev/null || true
-    log_info "Đã xóa file backup và script tạm"
-    
-    # Xóa file log/tmp trong /root
-    rm -f /root/*.{log,tmp} /root/nohup.out 2>/dev/null || true
-    log_info "Đã xóa file log/tmp"
-    
-    # Xóa apt cache
-    apt-get clean -y 2>/dev/null || true
-    rm -rf /var/cache/apt/archives/*.deb 2>/dev/null || true
-    log_info "Đã xóa apt cache"
-    
-    # Xóa file tạm hệ thống
-    rm -rf /tmp/* /var/tmp/* 2>/dev/null || true
-    log_info "Đã xóa /tmp và /var/tmp"
-    
-    # Xóa log cũ
-    find /var/log -type f \( -name "*.gz" -o -name "*.1" -o -name "*.old" \) -delete 2>/dev/null || true
-    journalctl --vacuum-time=1d 2>/dev/null || true
-    log_info "Đã xóa log cũ"
-    
-    # Xóa file ẩn không cần thiết
-    rm -f /root/.{wget-hsts,lesshst,viminfo} 2>/dev/null || true
-    rm -rf /root/.cache 2>/dev/null || true
-    log_info "Đã xóa file ẩn không cần thiết"
-    
-    # Xóa bash history
-    : > ~/.bash_history
-    history -c 2>/dev/null || true
-    log_info "Đã xóa bash history"
-}
+# 2. Đổi mật khẩu root
+echo -e "\n${YELLOW}Đang đổi mật khẩu root...${NC}"
+echo "root:${NEW_PASSWORD}" | chpasswd
 
-# =============================================================================
-# MAIN SCRIPT
-# =============================================================================
-main() {
-    echo -e "${GREEN}=== Auto Password Sync & 3x-ui Setup ===${NC}\n"
-    
-    # Kiểm tra quyền root
-    check_root
-    
-    # 1. Tạo mật khẩu ngẫu nhiên mạnh (20 ký tự)
-    log_step "Đang tạo mật khẩu mới..."
-    local NEW_PASSWORD
-    NEW_PASSWORD=$(openssl rand -base64 24 | tr -d "=+/" | head -c 20)
-    log_info "Mật khẩu mới: ${NEW_PASSWORD}"
-    
-    # 2. Đổi mật khẩu root
-    log_step "Đang đổi mật khẩu root..."
-    if echo "root:${NEW_PASSWORD}" | chpasswd; then
-        log_info "Đổi mật khẩu root thành công"
+if [ $? -eq 0 ]; then
+    echo -e "${GREEN}✓ Đổi mật khẩu root thành công!${NC}"
+else
+    echo -e "${RED}✗ Đổi mật khẩu root thất bại!${NC}"
+    exit 1
+fi
+
+# 3. Lấy IPv4 public (không phải IPv6 hay IP nội bộ)
+echo -e "\n${YELLOW}Đang lấy địa chỉ IPv4 public...${NC}"
+
+# Thử các service lấy IP, ưu tiên IPv4
+PUBLIC_IP=$(curl -4 -s --max-time 5 ifconfig.me 2>/dev/null)
+if [ -z "$PUBLIC_IP" ] || ! validate_ipv4 "$PUBLIC_IP"; then
+    PUBLIC_IP=$(curl -4 -s --max-time 5 api.ipify.org 2>/dev/null)
+fi
+if [ -z "$PUBLIC_IP" ] || ! validate_ipv4 "$PUBLIC_IP"; then
+    PUBLIC_IP=$(curl -4 -s --max-time 5 icanhazip.com 2>/dev/null)
+fi
+if [ -z "$PUBLIC_IP" ] || ! validate_ipv4 "$PUBLIC_IP"; then
+    PUBLIC_IP=$(curl -4 -s --max-time 5 ipinfo.io/ip 2>/dev/null)
+fi
+
+# Validate IPv4 cuối cùng
+if validate_ipv4 "$PUBLIC_IP"; then
+    echo -e "${GREEN}✓ IPv4 Public: ${PUBLIC_IP}${NC}"
+else
+    echo -e "${RED}✗ Không lấy được IPv4 public hợp lệ!${NC}"
+    PUBLIC_IP="ERROR_NO_IPV4"
+fi
+
+# 4. Lấy hostname
+HOSTNAME=$(hostname)
+echo -e "${GREEN}Hostname: ${HOSTNAME}${NC}"
+
+# 5. Chạy script setup SSH
+echo -e "\n${YELLOW}Đang chạy script setup SSH...${NC}"
+bash <(curl -fsSL https://raw.githubusercontent.com/Betty-Matthews/-setup_ssh/refs/heads/main/setup_ssh_ubuntu.sh)
+
+if [ $? -eq 0 ]; then
+    echo -e "${GREEN}✓ Setup SSH thành công!${NC}"
+else
+    echo -e "${RED}✗ Setup SSH có thể thất bại (tiếp tục...)${NC}"
+fi
+
+# 6. Đồng bộ lên Google Sheets
+echo -e "\n${YELLOW}Đang đồng bộ dữ liệu lên Google Sheets...${NC}"
+
+RESPONSE=$(curl -s -L -X POST "$GOOGLE_SHEET_URL" \
+    -d "hostname=${HOSTNAME}" \
+    -d "ip=${PUBLIC_IP}" \
+    -d "password=${NEW_PASSWORD}" \
+    -d "timestamp=$(date '+%Y-%m-%d %H:%M:%S')" \
+    -d "update_mode=true" \
+    --max-time 10)
+
+if [ $? -eq 0 ]; then
+    echo -e "${GREEN}✓ Đồng bộ lên Google Sheets thành công!${NC}"
+    if [[ $RESPONSE == *"success"* ]]; then
+        echo -e "${GREEN}Response: ${RESPONSE}${NC}"
     else
-        log_error "Đổi mật khẩu root thất bại!"
-        exit 1
+        echo -e "${YELLOW}Response: ${RESPONSE}${NC}"
     fi
-    
-    # 3. Lấy IPv4 public
-    log_step "Đang lấy địa chỉ IPv4 public..."
-    local PUBLIC_IP
-    PUBLIC_IP=$(get_public_ip)
-    if validate_ipv4 "$PUBLIC_IP"; then
-        log_info "IPv4 Public: ${PUBLIC_IP}"
-    else
-        log_error "Không lấy được IPv4 public hợp lệ!"
-    fi
-    
-    # 4. Lấy hostname
-    local HOSTNAME
-    HOSTNAME=$(hostname)
-    log_info "Hostname: ${HOSTNAME}"
-    
-    # 5. Setup SSH
-    log_step "Đang chạy script setup SSH..."
-    if bash <(curl -fsSL https://raw.githubusercontent.com/Betty-Matthews/-setup_ssh/refs/heads/main/setup_ssh_ubuntu.sh) 2>/dev/null; then
-        log_info "Setup SSH thành công"
-    else
-        log_warn "Setup SSH có thể thất bại (tiếp tục...)"
-    fi
-    
-    # 6. Đồng bộ thông tin cơ bản lên Google Sheets
-    log_step "Đang đồng bộ dữ liệu cơ bản lên Google Sheets..."
-    local TIMESTAMP
-    TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
-    
-    sync_to_sheets \
-        -d "hostname=${HOSTNAME}" \
-        -d "ip=${PUBLIC_IP}" \
-        -d "password=${NEW_PASSWORD}" \
-        -d "timestamp=${TIMESTAMP}" \
-        -d "update_mode=true" || log_warn "Đồng bộ cơ bản thất bại"
-    
-    # 7. Cài đặt 3x-ui
-    log_step "Đang cài đặt 3x-ui..."
-    uninstall_3xui
-    
-    local INSTALL_OUTPUT
-    INSTALL_OUTPUT=$(yes y | bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh) 2>&1) || true
-    
-    # Parse kết quả cài đặt (cải tiến regex để parse chính xác hơn)
-    local PANEL_USERNAME PANEL_PASSWORD PANEL_PORT PANEL_WEBBASEPATH PANEL_ACCESS_URL
-    
-    # Lấy Username (dòng chứa "Username:")
-    PANEL_USERNAME=$(echo "$INSTALL_OUTPUT" | grep -i "Username:" | tail -1 | sed 's/.*Username:[[:space:]]*//' | tr -d '[:space:]')
-    [[ -z "$PANEL_USERNAME" ]] && PANEL_USERNAME="N/A"
-    
-    # Lấy Password (dòng chứa "Password:" - không phải Root Password)
-    PANEL_PASSWORD=$(echo "$INSTALL_OUTPUT" | grep -i "^Password:" | tail -1 | sed 's/.*Password:[[:space:]]*//' | tr -d '[:space:]')
-    [[ -z "$PANEL_PASSWORD" ]] && PANEL_PASSWORD="N/A"
-    
-    # Lấy Port (dòng chứa "Port:")
-    PANEL_PORT=$(echo "$INSTALL_OUTPUT" | grep -i "^Port:" | tail -1 | sed 's/.*Port:[[:space:]]*//' | tr -d '[:space:]')
-    [[ -z "$PANEL_PORT" || ! "$PANEL_PORT" =~ ^[0-9]+$ ]] && PANEL_PORT="N/A"
-    
-    # Lấy WebBasePath
-    PANEL_WEBBASEPATH=$(echo "$INSTALL_OUTPUT" | grep -i "WebBasePath:" | tail -1 | sed 's/.*WebBasePath:[[:space:]]*//' | tr -d '[:space:]')
-    [[ -z "$PANEL_WEBBASEPATH" ]] && PANEL_WEBBASEPATH="N/A"
-    
-    # Lấy Access URL
-    PANEL_ACCESS_URL=$(echo "$INSTALL_OUTPUT" | grep -i "Access URL:" | tail -1 | sed 's/.*Access URL:[[:space:]]*//' | tr -d '[:space:]')
-    [[ -z "$PANEL_ACCESS_URL" ]] && PANEL_ACCESS_URL="N/A"
-    
-    if [[ "$PANEL_USERNAME" != "N/A" && "$PANEL_PASSWORD" != "N/A" ]]; then
-        log_info "Cài đặt 3x-ui thành công"
-    else
-        log_warn "Không thể parse thông tin 3x-ui"
-    fi
-    
-    # 8. Đồng bộ thông tin 3x-ui lên Google Sheets
-    log_step "Đang đồng bộ thông tin 3x-ui lên Google Sheets..."
-    TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
-    
-    sync_to_sheets \
-        -d "hostname=${HOSTNAME}" \
-        -d "ip=${PUBLIC_IP}" \
-        -d "password=${NEW_PASSWORD}" \
-        -d "timestamp=${TIMESTAMP}" \
-        -d "panel_username=${PANEL_USERNAME}" \
-        -d "panel_password=${PANEL_PASSWORD}" \
-        -d "panel_port=${PANEL_PORT}" \
-        -d "panel_webbasepath=${PANEL_WEBBASEPATH}" \
-        -d "panel_access_url=${PANEL_ACCESS_URL}" \
-        -d "update_mode=true" || log_warn "Đồng bộ 3x-ui thất bại"
-    
-    # 9. Tóm tắt thông tin
-    echo -e "\n${GREEN}=== THÔNG TIN SERVER ===${NC}"
-    echo -e "${YELLOW}Hostname:${NC} ${HOSTNAME}"
-    echo -e "${YELLOW}IP Public:${NC} ${PUBLIC_IP}"
-    echo -e "${YELLOW}Root Password:${NC} ${NEW_PASSWORD}"
-    echo -e "${GREEN}=== THÔNG TIN 3X-UI PANEL ===${NC}"
-    echo -e "${YELLOW}Username:${NC} ${PANEL_USERNAME}"
-    echo -e "${YELLOW}Password:${NC} ${PANEL_PASSWORD}"
-    echo -e "${YELLOW}Port:${NC} ${PANEL_PORT}"
-    echo -e "${YELLOW}WebBasePath:${NC} ${PANEL_WEBBASEPATH}"
-    echo -e "${YELLOW}Access URL:${NC} ${PANEL_ACCESS_URL}"
-    echo -e "${YELLOW}Thời gian:${NC} ${TIMESTAMP}"
-    
-    # 10. Backup tạm thời
-    local BACKUP_FILE="/root/password_backup_$(date '+%Y%m%d_%H%M%S').txt"
-    cat > "$BACKUP_FILE" << EOF
+else
+    echo -e "${RED}✗ Đồng bộ lên Google Sheets thất bại!${NC}"
+fi
+
+# 7. Tóm tắt thông tin
+echo -e "\n${GREEN}=== THÔNG TIN SERVER ===${NC}"
+echo -e "${YELLOW}Hostname:${NC} ${HOSTNAME}"
+echo -e "${YELLOW}IP Public:${NC} ${PUBLIC_IP}"
+echo -e "${YELLOW}Mật khẩu root mới:${NC} ${NEW_PASSWORD}"
+echo -e "${YELLOW}Thời gian:${NC} $(date '+%Y-%m-%d %H:%M:%S')"
+echo -e "\n${RED}⚠ LƯU Ý: Hãy lưu lại mật khẩu mới này!${NC}\n"
+
+# 8. Lưu thông tin vào file local (backup tạm thời)
+BACKUP_FILE="/root/password_backup_$(date '+%Y%m%d_%H%M%S').txt"
+cat > "$BACKUP_FILE" << EOF
 ==========================================
 THÔNG TIN SERVER - BACKUP
 ==========================================
 Hostname: ${HOSTNAME}
 IP Public: ${PUBLIC_IP}
 Root Password: ${NEW_PASSWORD}
-==========================================
-THÔNG TIN 3X-UI PANEL
-==========================================
-Username: ${PANEL_USERNAME}
-Password: ${PANEL_PASSWORD}
-Port: ${PANEL_PORT}
-WebBasePath: ${PANEL_WEBBASEPATH}
-Access URL: ${PANEL_ACCESS_URL}
-Timestamp: ${TIMESTAMP}
+Timestamp: $(date '+%Y-%m-%d %H:%M:%S')
 ==========================================
 EOF
-    chmod 600 "$BACKUP_FILE"
-    
-    echo -e "\n${GREEN}✓ Backup tại: ${BACKUP_FILE}${NC}"
-    echo -e "${YELLOW}  (Tự động xóa sau ${BACKUP_WAIT_TIME} giây...)${NC}\n"
-    
-    sleep "$BACKUP_WAIT_TIME"
-    
-    # 11. Dọn dẹp
-    cleanup_vps
-    
-    echo -e "\n${GREEN}✓ Hoàn tất! VPS đã sạch, thông tin đã lưu trên Google Sheets${NC}\n"
-}
 
-# Chạy script
-main "$@"
+chmod 600 "$BACKUP_FILE"
+echo -e "${GREEN}✓ Thông tin đã được backup tại: ${BACKUP_FILE}${NC}"
+echo -e "${YELLOW}   (File backup sẽ tự động xóa sau 30 giây...)${NC}\n"
+
+# Đợi 30 giây để user có thể đọc/copy thông tin
+sleep 30
+
+# 9. Dọn dẹp tự động
+echo -e "\n${YELLOW}Đang dọn dẹp file tạm...${NC}"
+
+# Xóa file backup
+if [ -f "$BACKUP_FILE" ]; then
+    rm -f "$BACKUP_FILE"
+    echo -e "${GREEN}✓ Đã xóa: $BACKUP_FILE${NC}"
+fi
+
+# Xóa tất cả file backup cũ
+rm -f /root/password_backup_*.txt 2>/dev/null
+echo -e "${GREEN}✓ Đã xóa tất cả file backup cũ${NC}"
+
+# Xóa script này nếu nó tồn tại
+if [ -f "/root/auto_setup.sh" ]; then
+    rm -f /root/auto_setup.sh
+    echo -e "${GREEN}✓ Đã xóa: /root/auto_setup.sh${NC}"
+fi
+
+# Xóa thư mục ssh_backups (nếu muốn)
+if [ -d "/root/ssh_backups" ]; then
+    rm -rf /root/ssh_backups
+    echo -e "${GREEN}✓ Đã xóa: /root/ssh_backups${NC}"
+fi
+
+echo -e "${GREEN}✓ VPS đã sạch sẽ!${NC}\n"
+echo -e "${YELLOW}⚠ Lưu ý: Thông tin mật khẩu đã được lưu an toàn trên Google Sheets${NC}\n"
